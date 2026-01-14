@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids.jni;
 
+import java.io.File;
+
 import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.HostMemoryBuffer;
 import ai.rapids.cudf.NativeDepsLoader;
@@ -32,6 +34,16 @@ import ai.rapids.cudf.Table;
 public class DeletionVector {
   static {
     NativeDepsLoader.loadNativeDeps();
+  }
+
+  private static long[] computeAddrsAndSizes(HostMemoryBuffer... buffers) {
+    assert buffers.length > 0;
+    long[] addrsSizes = new long[buffers.length * 2];
+    for (int i = 0; i < buffers.length; i++) {
+      addrsSizes[i * 2] = buffers[i].getAddress();
+      addrsSizes[(i * 2) + 1] = buffers[i].getLength();
+    }
+    return addrsSizes;
   }
 
   /**
@@ -57,13 +69,7 @@ public class DeletionVector {
                                   long[] rowGroupOffsets,
                                   int[] rowGroupNumRows,
                                   HostMemoryBuffer... buffers) {
-    assert buffers.length > 0;
-    long[] addrsSizes = new long[buffers.length * 2];
-    for (int i = 0; i < buffers.length; i++) {
-      addrsSizes[i * 2] = buffers[i].getAddress();
-      addrsSizes[(i * 2) + 1] = buffers[i].getLength();
-    }
-
+    long[] addrsSizes = computeAddrsAndSizes(buffers);
     long[] columnHandles = readParquetWithDeletionVector(opts.getIncludeColumnNames(),
                                                          opts.getReadBinaryAsString(),
                                                          null,
@@ -103,157 +109,151 @@ public class DeletionVector {
   }
 
   /**
-   * Chunked Parquet reader with deletion vector support.
-   * 
-   * This class allows reading large Parquet files in chunks while applying deletion vectors.
-   * Each chunk is guaranteed to stay within the specified size limits. The reader maintains
-   * state across chunk reads and applies the deletion vector consistently.
+   * Provide an interface for reading a Parquet file in an iterative manner.
    */
-  public static class ChunkedReader implements AutoCloseable {
-    private long handle = 0;
+  public static class ParquetChunkedReader implements AutoCloseable {
 
     /**
-     * Create a chunked Parquet reader with deletion vector support.
-     * 
-     * @param chunkReadLimit Byte limit on the returned table chunk size, or 0 if no limit
-     * @param optionsHandle Native handle to a parquet_reader_options object
-     * @param serializedRoaring64 Serialized 64-bit roaring bitmap (deletion vector)
-     * @param rowGroupOffsets Row index offsets for each row group
-     * @param rowGroupNumRows Number of rows in each row group
+     * Auxiliary variable to help {@link #hasNext()} returning true at least once.
      */
-    public ChunkedReader(long chunkReadLimit,
-                        long optionsHandle,
-                        byte[] serializedRoaring64,
-                        long[] rowGroupOffsets,
-                        int[] rowGroupNumRows) {
-      this.handle = createChunkedParquetReader(chunkReadLimit,
-                                               optionsHandle,
-                                               serializedRoaring64,
-                                               rowGroupOffsets,
-                                               rowGroupNumRows);
-      if (this.handle == 0) {
-        throw new IllegalStateException("Failed to create native chunked reader");
-      }
+    private boolean firstCall = true;
+
+    /**
+     * Handle for memory address of the native Parquet chunked reader class.
+     */
+    private long handle;
+
+    private long dataSourceHandle = 0;
+
+    private long multiHostBufferSourceHandle = 0;
+
+    /**
+     * Construct the reader instance from a read limit and a file path.
+     *
+     * @param chunkSizeByteLimit Limit on total number of bytes to be returned per read,
+     *                           or 0 if there is no limit.
+     * @param filePath Full path of the input Parquet file to read.
+     */
+    public ParquetChunkedReader(long chunkSizeByteLimit, File filePath,
+                                byte[] serializedRoaring64,
+                                long[] rowGroupOffsets,
+                                int[] rowGroupNumRows) {
+      this(chunkSizeByteLimit, ParquetOptions.DEFAULT, filePath, serializedRoaring64,
+          rowGroupOffsets, rowGroupNumRows);
     }
 
     /**
-     * Create a chunked Parquet reader with both chunk and pass read limits.
-     * 
-     * The pass read limit controls memory usage for decompression, allowing more fine-grained
-     * control over resource usage during reading.
-     * 
-     * @param chunkReadLimit Byte limit on the returned table chunk size, or 0 if no limit
-     * @param passReadLimit Byte limit on decompression memory, or 0 if no limit
-     * @param optionsHandle Native handle to a parquet_reader_options object
-     * @param serializedRoaring64 Serialized 64-bit roaring bitmap (deletion vector)
-     * @param rowGroupOffsets Row index offsets for each row group
-     * @param rowGroupNumRows Number of rows in each row group
+     * Construct the reader instance from a read limit, a ParquetOptions object, and a file path.
+     *
+     * @param chunkSizeByteLimit Limit on total number of bytes to be returned per read,
+     *                           or 0 if there is no limit.
+     * @param opts The options for Parquet reading.
+     * @param filePath Full path of the input Parquet file to read.
      */
-    public ChunkedReader(long chunkReadLimit,
-                        long passReadLimit,
-                        long optionsHandle,
-                        byte[] serializedRoaring64,
-                        long[] rowGroupOffsets,
-                        int[] rowGroupNumRows) {
-      this.handle = createChunkedParquetReaderWithPassLimit(chunkReadLimit,
-                                                            passReadLimit,
-                                                            optionsHandle,
-                                                            serializedRoaring64,
-                                                            rowGroupOffsets,
-                                                            rowGroupNumRows);
-      if (this.handle == 0) {
-        throw new IllegalStateException("Failed to create native chunked reader");
-      }
+    public ParquetChunkedReader(long chunkSizeByteLimit, ParquetOptions opts, File filePath,
+                                byte[] serializedRoaring64,
+                                long[] rowGroupOffsets,
+                                int[] rowGroupNumRows) {
+      this(chunkSizeByteLimit, 0, opts, filePath, serializedRoaring64,
+          rowGroupOffsets, rowGroupNumRows);
     }
 
     /**
-     * Create a chunked Parquet reader with multiple deletion vectors support.
-     * 
-     * @param chunkReadLimit Byte limit on the returned table chunk size, or 0 if no limit
-     * @param optionsHandle Native handle to a parquet_reader_options object
-     * @param serializedRoaringBitmaps Array of serialized 64-bit roaring bitmaps (deletion vectors)
-     * @param deletionVectorRowCounts Number of rows in each deletion vector
-     * @param rowGroupOffsets Row index offsets for each row group
-     * @param rowGroupNumRows Number of rows in each row group
+     * Construct the reader instance from a read limit, a ParquetOptions object, and a file path.
+     *
+     * @param chunkSizeByteLimit Limit on total number of bytes to be returned per read,
+     *                           or 0 if there is no limit.
+     * @param passReadLimit Limit on the amount of memory used for reading and decompressing data or
+     *                      0 if there is no limit
+     * @param opts The options for Parquet reading.
+     * @param filePath Full path of the input Parquet file to read.
      */
-    public ChunkedReader(long chunkReadLimit,
-                        long optionsHandle,
-                        byte[][] serializedRoaringBitmaps,
-                        int[] deletionVectorRowCounts,
-                        long[] rowGroupOffsets,
-                        int[] rowGroupNumRows) {
-      this.handle = createChunkedReaderWithMultipleDeletionVectors(chunkReadLimit,
-                                                                   optionsHandle,
-                                                                   serializedRoaringBitmaps,
-                                                                   deletionVectorRowCounts,
-                                                                   rowGroupOffsets,
-                                                                   rowGroupNumRows);
-      if (this.handle == 0) {
-        throw new IllegalStateException("Failed to create native chunked reader");
+    public ParquetChunkedReader(long chunkSizeByteLimit,
+                                long passReadLimit, 
+                                ParquetOptions opts, 
+                                File filePath,
+                                byte[] serializedRoaring64,
+                                long[] rowGroupOffsets,
+                                int[] rowGroupNumRows) {
+      long[] handles = createChunkedParquetReaderWithPassLimit(chunkSizeByteLimit, passReadLimit,
+        opts.getIncludeColumnNames(), opts.getReadBinaryAsString(),
+        filePath.getAbsolutePath(), null, opts.timeUnit().typeId.getNativeId(),
+      serializedRoaring64, rowGroupOffsets, rowGroupNumRows);
+      handle = handles[0];
+      if (handle == 0) {
+        throw new IllegalStateException("Cannot create native chunked Parquet reader object.");
       }
+      multiHostBufferSourceHandle = handles[1];
     }
 
     /**
-     * Create a chunked Parquet reader with multiple deletion vectors and pass read limit.
-     * 
-     * The pass read limit controls memory usage for decompression, allowing more fine-grained
-     * control over resource usage during reading.
-     * 
-     * @param chunkReadLimit Byte limit on the returned table chunk size, or 0 if no limit
-     * @param passReadLimit Byte limit on decompression memory, or 0 if no limit
-     * @param optionsHandle Native handle to a parquet_reader_options object
-     * @param serializedRoaringBitmaps Array of serialized 64-bit roaring bitmaps (deletion vectors)
-     * @param deletionVectorRowCounts Number of rows in each deletion vector
-     * @param rowGroupOffsets Row index offsets for each row group
-     * @param rowGroupNumRows Number of rows in each row group
+     * Construct the reader instance from a read limit and data in host memory buffers.
+     *
+     * @param chunkSizeByteLimit Limit on total number of bytes to be returned per read,
+     *                           or 0 if there is no limit.
+     * @param passReadLimit Limit on the amount of memory used for reading and decompressing data or
+     *                      0 if there is no limit
+     * @param opts The options for Parquet reading.
+     * @param buffers Array of buffers containing the file data. The buffers are logically
+     *                concatenated to construct the file being read.
      */
-    public ChunkedReader(long chunkReadLimit,
-                        long passReadLimit,
-                        long optionsHandle,
-                        byte[][] serializedRoaringBitmaps,
-                        int[] deletionVectorRowCounts,
-                        long[] rowGroupOffsets,
-                        int[] rowGroupNumRows) {
-      this.handle = createChunkedReaderWithMultipleDeletionVectorsAndPassLimit(
-                                                            chunkReadLimit,
-                                                            passReadLimit,
-                                                            optionsHandle,
-                                                            serializedRoaringBitmaps,
-                                                            deletionVectorRowCounts,
-                                                            rowGroupOffsets,
-                                                            rowGroupNumRows);
-      if (this.handle == 0) {
-        throw new IllegalStateException("Failed to create native chunked reader");
+    public ParquetChunkedReader(long chunkSizeByteLimit, long passReadLimit,
+                                ParquetOptions opts,
+                                byte[] serializedRoaring64,
+                                long[] rowGroupOffsets,
+                                int[] rowGroupNumRows, 
+                                HostMemoryBuffer... buffers) {
+      long[] addrsSizes = new long[buffers.length * 2];
+      for (int i = 0; i < buffers.length; i++) {
+        addrsSizes[i * 2] = buffers[i].getAddress();
+        addrsSizes[(i * 2) + 1] = buffers[i].getLength();
       }
+
+      long[] handles = createChunkedParquetReaderWithPassLimit(chunkSizeByteLimit, passReadLimit,
+        opts.getIncludeColumnNames(), opts.getReadBinaryAsString(), null,
+          addrsSizes, opts.timeUnit().typeId.getNativeId(),
+          serializedRoaring64, rowGroupOffsets, rowGroupNumRows);
+      handle = handles[0];
+      if (handle == 0) {
+        throw new IllegalStateException("Cannot create native chunked Parquet reader object.");
+      }
+      multiHostBufferSourceHandle = handles[1];
     }
 
     /**
-     * Check if there is more data to read.
-     * 
-     * @return true if there are more chunks to read, false otherwise
+     * Check if the given file has anything left to read.
+     *
+     * @return A boolean value indicating if there is more data to read from file.
      */
     public boolean hasNext() {
       if (handle == 0) {
-        throw new IllegalStateException("ChunkedReader has been closed");
+        throw new IllegalStateException("Native chunked Parquet reader object may have been closed.");
+      }
+
+      if (firstCall) {
+        // This function needs to return true at least once, so an empty table
+        // (but having empty columns instead of no column) can be returned by readChunk()
+        // if the input file has no row.
+        firstCall = false;
+        return true;
       }
       return chunkedReaderHasNext(handle);
     }
 
     /**
-     * Read the next chunk from the Parquet file.
-     * 
-     * Returns a Table containing the next chunk of data with the deletion vector applied
-     * and index column prepended. The chunk size will not exceed the limit specified during
-     * reader creation (unless a single row group exceeds the limit).
-     * 
-     * @return A Table containing the next chunk, or null if no more data
+     * Read a chunk of rows in the given Parquet file such that the returning data has total size
+     * does not exceed the given read limit. If the given file has no data, or all data has been read
+     * before by previous calls to this function, a null Table will be returned.
+     *
+     * @return A table of new rows reading from the given file.
      */
     public Table readChunk() {
       if (handle == 0) {
-        throw new IllegalStateException("ChunkedReader has been closed");
+        throw new IllegalStateException("Native chunked Parquet reader object may have been closed.");
       }
+
       long[] columnPtrs = chunkedReaderReadChunk(handle);
-      return columnPtrs == null ? null : new Table(columnPtrs);
+      return columnPtrs != null ? new Table(columnPtrs) : null;
     }
 
     @Override
@@ -261,6 +261,14 @@ public class DeletionVector {
       if (handle != 0) {
         closeChunkedReader(handle);
         handle = 0;
+      }
+      // if (dataSourceHandle != 0) {
+      //   DataSourceHelper.destroyWrapperDataSource(dataSourceHandle);
+      //   dataSourceHandle = 0;
+      // }
+      if (multiHostBufferSourceHandle != 0) {
+        destroyMultiHostBufferSource(multiHostBufferSourceHandle);
+        multiHostBufferSourceHandle = 0;
       }
     }
   }
@@ -293,8 +301,12 @@ public class DeletionVector {
   /**
    * Native method to create a chunked Parquet reader.
    */
-  private static native long createChunkedParquetReader(long chunkReadLimit,
-                                                       long optionsHandle,
+  private static native long createChunkedParquetReader(String[] filterColumnNames,
+                                                       boolean[] binaryToString,
+                                                       String filePath,
+                                                       long[] addrsAndSizes,
+                                                       int timeUnit,
+                                                       long chunkReadLimit,
                                                        byte[] serializedRoaring64,
                                                        long[] rowGroupOffsets,
                                                        int[] rowGroupNumRows)
@@ -303,9 +315,13 @@ public class DeletionVector {
   /**
    * Native method to create a chunked Parquet reader with pass limit.
    */
-  private static native long createChunkedParquetReaderWithPassLimit(long chunkReadLimit,
+  private static native long[] createChunkedParquetReaderWithPassLimit(long chunkReadLimit,
                                                                      long passReadLimit,
-                                                                     long optionsHandle,
+                                                                     String[] filterColumnNames,
+                                                                     boolean[] binaryToString,
+                                                                     String filePath,
+                                                                     long[] addrsAndSizes,
+                                                                     int timeUnit,
                                                                      byte[] serializedRoaring64,
                                                                      long[] rowGroupOffsets,
                                                                      int[] rowGroupNumRows)
@@ -349,4 +365,6 @@ public class DeletionVector {
    * Native method to close and destroy chunked reader.
    */
   private static native void closeChunkedReader(long readerHandle) throws CudfException;
+
+  private static native void destroyMultiHostBufferSource(long handle);
 }

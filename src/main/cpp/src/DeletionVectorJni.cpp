@@ -70,21 +70,15 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_readParquetWithDeletionVector(
   {
     cudf::jni::auto_set_device(env);
 
-    std::cerr << "Starting DeletionVector_readParquetWithDeletionVector JNI call" << std::endl;
-
     cudf::jni::native_jstring filename(env, inputfilepath);
     if (!read_buffer && filename.is_empty()) {
       JNI_THROW_NEW(
         env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "inputfilepath can't be empty", NULL);
     }
 
-    std::cerr << "Converted filename" << std::endl;
-
     cudf::jni::native_jstringArray n_filter_col_names(env, filter_col_names);
     cudf::jni::native_jbooleanArray n_col_binary_read(env, j_col_binary_read);
     cudf::jni::native_jlongArray n_addrs_sizes(env, addrs_and_sizes);
-
-    std::cerr << "Converted filter column names and addrs and sizes" << std::endl;
 
     std::unique_ptr<cudf::io::datasource> multi_buffer_source;
     cudf::io::source_info source;
@@ -95,14 +89,10 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_readParquetWithDeletionVector(
       source = cudf::io::source_info(filename.get());
     }
 
-    std::cerr << "Created source info" << std::endl;
-
     auto builder = cudf::io::parquet_reader_options::builder(source);
     if (n_filter_col_names.size() > 0) {
       builder = builder.columns(n_filter_col_names.as_cpp_vector());
     }
-
-    std::cerr << "Built parquet reader options builder" << std::endl;
 
     cudf::io::parquet_reader_options opts =
       builder.convert_strings_to_categories(false)
@@ -110,8 +100,6 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_readParquetWithDeletionVector(
         // Ignore any missing projected column(s) by default
         .ignore_missing_columns(true)
         .build();
-
-    std::cerr << "Built parquet reader options" << std::endl;
 
     // Convert serialized roaring bitmap
     cudf::host_span<cuda::std::byte const> serialized_roaring64;
@@ -122,8 +110,6 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_readParquetWithDeletionVector(
         n_serialized_roaring64.size());
     }
 
-    std::cerr << "Converted serialized roaring64 bitmap" << std::endl;
-
     // Convert row group offsets
     cudf::host_span<size_t const> row_group_offsets;
     cudf::jni::native_jlongArray n_row_group_offsets(env, j_row_group_offsets);
@@ -131,8 +117,6 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_readParquetWithDeletionVector(
       row_group_offsets = cudf::host_span<size_t const>(
         reinterpret_cast<size_t const*>(n_row_group_offsets.data()), n_row_group_offsets.size());
     }
-
-    std::cerr << "Converted row group offsets" << std::endl;
 
     // Convert row group num_rows
     cudf::host_span<cudf::size_type const> row_group_num_rows;
@@ -142,13 +126,10 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_readParquetWithDeletionVector(
                                                                    n_row_group_num_rows.size());
     }
 
-    std::cerr << "Converted row group num rows" << std::endl;
-
     // Call the cuDF function
     auto tbl = cudf::io::parquet::experimental::read_parquet(
       opts, serialized_roaring64, row_group_offsets, row_group_num_rows).tbl;
 
-    std::cerr << "Completed read_parquet call" << std::endl;
     n_col_binary_read.cancel();
     n_addrs_sizes.cancel();
 
@@ -277,21 +258,62 @@ JNIEXPORT jlong JNICALL
 Java_com_nvidia_spark_rapids_jni_DeletionVector_createChunkedParquetReader(
   JNIEnv* env,
   jclass,
+  jobjectArray filter_col_names,
+  jbooleanArray j_col_binary_read,
+  jstring inputfilepath,
+  jlongArray addrs_and_sizes,
+  jint unit,
   jlong j_chunk_read_limit,
-  jlong j_options_handle,
   jbyteArray j_serialized_roaring64,
   jlongArray j_row_group_offsets,
   jintArray j_row_group_num_rows)
 {
-  JNI_NULL_CHECK(env, j_options_handle, "options handle is null", 0);
+  JNI_NULL_CHECK(env, j_col_binary_read, "null col_binary_read", 0);
+  bool read_buffer = true;
+  if (addrs_and_sizes == nullptr) {
+    JNI_NULL_CHECK(env, inputfilepath, "input file or buffer must be supplied", 0);
+    read_buffer = false;
+  } else if (inputfilepath != NULL) {
+    JNI_THROW_NEW(env,
+                  cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS,
+                  "cannot pass in both a buffer and an inputfilepath",
+                  0);
+  }
 
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
 
-    // Get the parquet_reader_options from the handle
-    auto const& options =
-      *reinterpret_cast<cudf::io::parquet_reader_options const*>(j_options_handle);
+    cudf::jni::native_jstring filename(env, inputfilepath);
+    if (!read_buffer && filename.is_empty()) {
+      JNI_THROW_NEW(
+        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "inputfilepath can't be empty", 0);
+    }
+
+    cudf::jni::native_jstringArray n_filter_col_names(env, filter_col_names);
+    cudf::jni::native_jbooleanArray n_col_binary_read(env, j_col_binary_read);
+    cudf::jni::native_jlongArray n_addrs_sizes(env, addrs_and_sizes);
+
+    std::unique_ptr<cudf::io::datasource> multi_buffer_source;
+    cudf::io::source_info source;
+    if (read_buffer) {
+      multi_buffer_source.reset(new cudf::jni::multi_host_buffer_source(n_addrs_sizes));
+      source = cudf::io::source_info(multi_buffer_source.get());
+    } else {
+      source = cudf::io::source_info(filename.get());
+    }
+
+    auto builder = cudf::io::parquet_reader_options::builder(source);
+    if (n_filter_col_names.size() > 0) {
+      builder = builder.columns(n_filter_col_names.as_cpp_vector());
+    }
+
+    cudf::io::parquet_reader_options opts =
+      builder.convert_strings_to_categories(false)
+        .timestamp_type(cudf::data_type(static_cast<cudf::type_id>(unit)))
+        // Ignore any missing projected column(s) by default
+        .ignore_missing_columns(true)
+        .build();
 
     // Convert serialized roaring bitmap
     cudf::host_span<cuda::std::byte const> serialized_roaring64;
@@ -321,7 +343,7 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_createChunkedParquetReader(
     // Create the chunked reader
     auto reader = new cudf::io::parquet::experimental::chunked_parquet_reader(
       static_cast<std::size_t>(j_chunk_read_limit),
-      options,
+      opts,
       serialized_roaring64,
       row_group_offsets,
       row_group_num_rows);
@@ -345,26 +367,71 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_createChunkedParquetReader(
  * @param j_row_group_num_rows Number of rows in each row group
  * @return Handle to the chunked_parquet_reader (as jlong)
  */
-JNIEXPORT jlong JNICALL
+JNIEXPORT jlongArray JNICALL
 Java_com_nvidia_spark_rapids_jni_DeletionVector_createChunkedParquetReaderWithPassLimit(
   JNIEnv* env,
   jclass,
   jlong j_chunk_read_limit,
   jlong j_pass_read_limit,
-  jlong j_options_handle,
+  jobjectArray filter_col_names,
+  jbooleanArray j_col_binary_read,
+  jstring inp_file_path,
+  jlongArray addrs_sizes,
+  jint unit,
   jbyteArray j_serialized_roaring64,
   jlongArray j_row_group_offsets,
   jintArray j_row_group_num_rows)
 {
-  JNI_NULL_CHECK(env, j_options_handle, "options handle is null", 0);
+  JNI_NULL_CHECK(env, j_col_binary_read, "Null col_binary_read", nullptr);
+  bool read_buffer = true;
+  if (addrs_sizes == nullptr) {
+    JNI_NULL_CHECK(env, inp_file_path, "Input file or buffer must be supplied", nullptr);
+    read_buffer = false;
+  } else if (inp_file_path != nullptr) {
+    JNI_THROW_NEW(env,
+                  cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS,
+                  "Cannot pass in both buffers and an inp_file_path",
+                  nullptr);
+  }
 
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
 
-    // Get the parquet_reader_options from the handle
-    auto const& options =
-      *reinterpret_cast<cudf::io::parquet_reader_options const*>(j_options_handle);
+    cudf::jni::auto_set_device(env);
+    cudf::jni::native_jstring filename(env, inp_file_path);
+    if (!read_buffer && filename.is_empty()) {
+      JNI_THROW_NEW(
+        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "inp_file_path cannot be empty", nullptr);
+    }
+
+    cudf::jni::native_jstringArray n_filter_col_names(env, filter_col_names);
+
+    // TODO: This variable is unused now, but we still don't know what to do with it yet.
+    // As such, it needs to stay here for a little more time before we decide to use it again,
+    // or remove it completely.
+    cudf::jni::native_jbooleanArray n_col_binary_read(env, j_col_binary_read);
+    (void)n_col_binary_read;
+
+    cudf::jni::native_jlongArray n_addrs_sizes(env, addrs_sizes);
+    std::unique_ptr<cudf::io::datasource> multi_buffer_source;
+    cudf::io::source_info source;
+    if (read_buffer) {
+      multi_buffer_source.reset(new cudf::jni::multi_host_buffer_source(n_addrs_sizes));
+      source = cudf::io::source_info(multi_buffer_source.get());
+    } else {
+      source = cudf::io::source_info(filename.get());
+    }
+
+    auto opts_builder = cudf::io::parquet_reader_options::builder(source);
+    if (n_filter_col_names.size() > 0) {
+      opts_builder = opts_builder.columns(n_filter_col_names.as_cpp_vector());
+    }
+    auto const read_opts = opts_builder.convert_strings_to_categories(false)
+                             .timestamp_type(cudf::data_type(static_cast<cudf::type_id>(unit)))
+                             // Ignore any missing projected column(s) by default
+                             .ignore_missing_columns(true)
+                             .build();
 
     // Convert serialized roaring bitmap
     cudf::host_span<cuda::std::byte const> serialized_roaring64;
@@ -391,18 +458,25 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_createChunkedParquetReaderWithPa
                                                                    n_row_group_num_rows.size());
     }
 
+    n_addrs_sizes.cancel();
+    n_col_binary_read.cancel();
+
     // Create the chunked reader with pass read limit
     auto reader = new cudf::io::parquet::experimental::chunked_parquet_reader(
       static_cast<std::size_t>(j_chunk_read_limit),
       static_cast<std::size_t>(j_pass_read_limit),
-      options,
+      read_opts,
       serialized_roaring64,
       row_group_offsets,
       row_group_num_rows);
 
-    return reinterpret_cast<jlong>(reader);
+    auto reader_handle = reinterpret_cast<jlong>(reader);
+    cudf::jni::native_jlongArray result(env, 2);
+    result[0] = reader_handle;
+    result[1] = cudf::jni::release_as_jlong(multi_buffer_source);
+    return result.get_jArray();
   }
-  JNI_CATCH(env, 0);
+  JNI_CATCH(env, nullptr);
 }
 
 /**
@@ -641,7 +715,7 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_chunkedReaderHasNext(JNIEnv* env
   {
     cudf::jni::auto_set_device(env);
     auto const reader =
-      reinterpret_cast<cudf::io::parquet::experimental::chunked_parquet_reader*>(j_reader_handle);
+      reinterpret_cast<cudf::io::parquet::experimental::chunked_parquet_reader* const>(j_reader_handle);
     return reader->has_next();
   }
   JNI_CATCH(env, false);
@@ -665,7 +739,7 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_chunkedReaderReadChunk(JNIEnv* e
   {
     cudf::jni::auto_set_device(env);
     auto const reader =
-      reinterpret_cast<cudf::io::parquet::experimental::chunked_parquet_reader*>(j_reader_handle);
+      reinterpret_cast<cudf::io::parquet::experimental::chunked_parquet_reader* const>(j_reader_handle);
     auto chunk = reader->read_chunk();
     return chunk.tbl ? cudf::jni::convert_table_for_return(env, chunk.tbl) : nullptr;
   }
@@ -689,6 +763,15 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_DeletionVector_closeChun
     delete reinterpret_cast<cudf::io::parquet::experimental::chunked_parquet_reader*>(
       j_reader_handle);
   }
+  JNI_CATCH(env, );
+}
+
+JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_DeletionVector_destroyMultiHostBufferSource(
+  JNIEnv* env, jclass, jlong handle)
+{
+  JNI_NULL_CHECK(env, handle, "handle is null", );
+
+  JNI_TRY { delete reinterpret_cast<cudf::jni::multi_host_buffer_source*>(handle); }
   JNI_CATCH(env, );
 }
 
