@@ -242,118 +242,6 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_readParquetWithMultipleDeletionV
 }
 
 /**
- * @brief Create a chunked Parquet reader with deletion vector support
- *
- * This JNI function creates a chunked_parquet_reader that supports deletion vectors.
- *
- * @param env JNI environment
- * @param j_chunk_read_limit Byte limit on returned table chunk size, 0 if no limit
- * @param j_options_handle Handle to the parquet_reader_options object
- * @param j_serialized_roaring64 Serialized 64-bit roaring bitmap (deletion vector)
- * @param j_row_group_offsets Row index offsets for each row group
- * @param j_row_group_num_rows Number of rows in each row group
- * @return Handle to the chunked_parquet_reader (as jlong)
- */
-JNIEXPORT jlong JNICALL
-Java_com_nvidia_spark_rapids_jni_DeletionVector_createChunkedParquetReader(
-  JNIEnv* env,
-  jclass,
-  jobjectArray filter_col_names,
-  jbooleanArray j_col_binary_read,
-  jstring inputfilepath,
-  jlongArray addrs_and_sizes,
-  jint unit,
-  jlong j_chunk_read_limit,
-  jbyteArray j_serialized_roaring64,
-  jlongArray j_row_group_offsets,
-  jintArray j_row_group_num_rows)
-{
-  JNI_NULL_CHECK(env, j_col_binary_read, "null col_binary_read", 0);
-  bool read_buffer = true;
-  if (addrs_and_sizes == nullptr) {
-    JNI_NULL_CHECK(env, inputfilepath, "input file or buffer must be supplied", 0);
-    read_buffer = false;
-  } else if (inputfilepath != NULL) {
-    JNI_THROW_NEW(env,
-                  cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS,
-                  "cannot pass in both a buffer and an inputfilepath",
-                  0);
-  }
-
-  JNI_TRY
-  {
-    cudf::jni::auto_set_device(env);
-
-    cudf::jni::native_jstring filename(env, inputfilepath);
-    if (!read_buffer && filename.is_empty()) {
-      JNI_THROW_NEW(
-        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "inputfilepath can't be empty", 0);
-    }
-
-    cudf::jni::native_jstringArray n_filter_col_names(env, filter_col_names);
-    cudf::jni::native_jbooleanArray n_col_binary_read(env, j_col_binary_read);
-    cudf::jni::native_jlongArray n_addrs_sizes(env, addrs_and_sizes);
-
-    std::unique_ptr<cudf::io::datasource> multi_buffer_source;
-    cudf::io::source_info source;
-    if (read_buffer) {
-      multi_buffer_source.reset(new cudf::jni::multi_host_buffer_source(n_addrs_sizes));
-      source = cudf::io::source_info(multi_buffer_source.get());
-    } else {
-      source = cudf::io::source_info(filename.get());
-    }
-
-    auto builder = cudf::io::parquet_reader_options::builder(source);
-    if (n_filter_col_names.size() > 0) {
-      builder = builder.columns(n_filter_col_names.as_cpp_vector());
-    }
-
-    cudf::io::parquet_reader_options opts =
-      builder.convert_strings_to_categories(false)
-        .timestamp_type(cudf::data_type(static_cast<cudf::type_id>(unit)))
-        // Ignore any missing projected column(s) by default
-        .ignore_missing_columns(true)
-        .build();
-
-    // Convert serialized roaring bitmap
-    cudf::host_span<cuda::std::byte const> serialized_roaring64;
-    cudf::jni::native_jbyteArray n_serialized_roaring64(env, j_serialized_roaring64);
-    if (j_serialized_roaring64 != nullptr && n_serialized_roaring64.size() > 0) {
-      serialized_roaring64 = cudf::host_span<cuda::std::byte const>(
-        reinterpret_cast<cuda::std::byte const*>(n_serialized_roaring64.data()),
-        n_serialized_roaring64.size());
-    }
-
-    // Convert row group offsets
-    cudf::host_span<size_t const> row_group_offsets;
-    cudf::jni::native_jlongArray n_row_group_offsets(env, j_row_group_offsets);
-    if (j_row_group_offsets != nullptr && n_row_group_offsets.size() > 0) {
-      row_group_offsets = cudf::host_span<size_t const>(
-        reinterpret_cast<size_t const*>(n_row_group_offsets.data()), n_row_group_offsets.size());
-    }
-
-    // Convert row group num_rows
-    cudf::host_span<cudf::size_type const> row_group_num_rows;
-    cudf::jni::native_jintArray n_row_group_num_rows(env, j_row_group_num_rows);
-    if (j_row_group_num_rows != nullptr && n_row_group_num_rows.size() > 0) {
-      row_group_num_rows = cudf::host_span<cudf::size_type const>(n_row_group_num_rows.data(),
-                                                                   n_row_group_num_rows.size());
-    }
-
-    // Create the chunked reader
-    auto reader = new cudf::io::parquet::experimental::chunked_parquet_reader(
-      static_cast<std::size_t>(j_chunk_read_limit),
-      opts,
-      serialized_roaring64,
-      row_group_offsets,
-      row_group_num_rows);
-
-    return reinterpret_cast<jlong>(reader);
-  }
-  JNI_CATCH(env, 0);
-}
-
-/**
  * @brief Create a chunked Parquet reader with deletion vector support and pass read limit
  *
  * This JNI function creates a chunked_parquet_reader with both chunk and pass read limits.
@@ -442,6 +330,13 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_createChunkedParquetReaderWithPa
         n_serialized_roaring64.size());
     }
 
+    printf("creating serialized_roaring64_bitmaps span\n");
+    std::vector<cudf::host_span<cuda::std::byte const>> serialized_roaring_bitmaps_vec;
+    serialized_roaring_bitmaps_vec.push_back(serialized_roaring64);
+    cudf::host_span<cudf::host_span<cuda::std::byte const> const> serialized_roaring64_bitmaps(
+      serialized_roaring_bitmaps_vec);
+    printf("created serialized_roaring64_bitmaps span\n");
+
     // Convert row group offsets
     cudf::host_span<size_t const> row_group_offsets;
     cudf::jni::native_jlongArray n_row_group_offsets(env, j_row_group_offsets);
@@ -461,12 +356,19 @@ Java_com_nvidia_spark_rapids_jni_DeletionVector_createChunkedParquetReaderWithPa
     n_addrs_sizes.cancel();
     n_col_binary_read.cancel();
 
+    printf("creating deletion_vector_row_counts span\n");
+    std::vector<cudf::size_type> deletion_vector_row_counts;
+    deletion_vector_row_counts.emplace_back(std::numeric_limits<cudf::size_type>::max());
+    cudf::host_span<cudf::size_type const> deletion_vector_row_counts_span(deletion_vector_row_counts);
+    printf("created deletion_vector_row_counts span\n");
+
     // Create the chunked reader with pass read limit
     auto reader = new cudf::io::parquet::experimental::chunked_parquet_reader(
       static_cast<std::size_t>(j_chunk_read_limit),
       static_cast<std::size_t>(j_pass_read_limit),
       read_opts,
-      serialized_roaring64,
+      serialized_roaring64_bitmaps,
+      deletion_vector_row_counts_span,
       row_group_offsets,
       row_group_num_rows);
 

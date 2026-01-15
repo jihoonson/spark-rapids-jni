@@ -82,33 +82,6 @@ public class DeletionVector {
   }
 
   /**
-   * Read a Parquet file with multiple deletion vectors support.
-   * 
-   * Reads a Parquet file with multiple deletion vectors that can be applied to different
-   * ranges of data as specified by the deletion vector row counts.
-   * 
-   * @param optionsHandle Native handle to a parquet_reader_options object
-   * @param serializedRoaringBitmaps Array of serialized 64-bit roaring bitmaps
-   * @param deletionVectorRowCounts Number of rows in each deletion vector
-   * @param rowGroupOffsets Row index offsets for each row group
-   * @param rowGroupNumRows Number of rows in each row group
-   * @return A Table containing the filtered data with a prepended UINT64 index column
-   * @throws CudfException if an error occurs during reading
-   */
-  public static Table readParquetWithDeletionVectors(long optionsHandle,
-                                                             byte[][] serializedRoaringBitmaps,
-                                                             int[] deletionVectorRowCounts,
-                                                             long[] rowGroupOffsets,
-                                                             int[] rowGroupNumRows) {
-    long[] columnHandles = readParquetWithMultipleDeletionVectors(optionsHandle,
-                                                                  serializedRoaringBitmaps,
-                                                                  deletionVectorRowCounts,
-                                                                  rowGroupOffsets,
-                                                                  rowGroupNumRows);
-    return columnHandles == null ? null : new Table(columnHandles);
-  }
-
-  /**
    * Provide an interface for reading a Parquet file in an iterative manner.
    */
   public static class ParquetChunkedReader implements AutoCloseable {
